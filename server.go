@@ -300,11 +300,10 @@ func (s *Server) Authenticate(ctx context.Context, r *http.Request) (string, err
 	}
 
 	// Create the token
-	token := jwt.New(jwt.SigningMethodHS512)
-
-	// Set some claims
-	token.Claims["userId"] = userID
-	token.Claims["exp"] = time.Now().Add(s.cfg.SigningDuration).Unix()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS512, jwt.MapClaims{
+		"userId": userID,
+		"exp": time.Now().Add(s.cfg.SigningDuration).Unix(),
+	})
 
 	// Sign and get the complete encoded token as a string
 	return token.SignedString(s.cfg.SigningKey)
@@ -379,7 +378,8 @@ func (s *Server) AuthenticatedFilter( /*loginURL string*/ ) func(next xhandler.H
 			})
 
 			//Store user in new context
-			userID, ok := token.Claims["userId"].(string)
+			claims := token.Claims.(jwt.MapClaims)
+			userID, ok := claims["userId"].(string)
 			if !ok {
 				http.Error(w, "Invalid user ID in token", http.StatusInternalServerError)
 				return
