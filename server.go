@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt" //TODO: rearchitecture so that we can log easily
 	"io/ioutil"
@@ -12,11 +13,9 @@ import (
 	"time"
 
 	jwt "github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/handlers"
+	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
-	"github.com/rs/cors"
-	"github.com/rs/xhandler"
-	"github.com/rs/xmux"
-	"golang.org/x/net/context"
 )
 
 // Config provides the configuration for the API server
@@ -27,13 +26,22 @@ type Config struct {
 	SigningDuration time.Duration
 }
 
+type Chain []func(next http.Handler) http.Handler
+
+func (c Chain) Handler(h http.Handler) http.Handler {
+	for i := len(c) - 1; i >= 0; i-- {
+		h = c[i](h)
+	}
+	return h
+}
+
 // Server contains instance details for the server
 type Server struct {
 	CheckPassword      func(ctx context.Context, userID, password string) error
 	cfg                Config
-	mux                *xmux.Mux
-	middlewares        xhandler.Chain
-	privateMiddlewares xhandler.Chain
+	mux                *mux.Router
+	middlewares        Chain
+	privateMiddlewares Chain
 }
 
 // New returns a new instance of the server based on the specified configuration.
@@ -43,12 +51,12 @@ func New(cfg Config) *Server {
 			return errors.New("not implemented")
 		},
 		cfg: cfg,
-		mux: xmux.New(),
+		mux: mux.NewRouter(),
 	}
 
 	//TODO: add global middlewares, based on cfg
 
-	s.privateMiddlewares.UseC(s.AuthenticatedFilter())
+	s.privateMiddlewares = append(s.privateMiddlewares, s.AuthenticatedFilter())
 
 	return &s
 }
@@ -59,9 +67,9 @@ func (s *Server) Login(loginPath string) { //TODO add refreshPath or switch to d
 	s.Public(NewJSONRoute("POST", loginPath, s.loginHandler))
 }
 
-func (s *Server) loginHandler(ctx context.Context, req *http.Request) (interface{}, error) {
+func (s *Server) loginHandler(req *http.Request) (interface{}, error) {
 
-	token, err := s.Authenticate(ctx, req)
+	token, err := s.Authenticate(req)
 	if err != nil {
 		return nil, errors.Wrap(err, "Authenticate failed")
 	}
@@ -85,20 +93,15 @@ func (s *Server) Private(route Route) {
 
 // addRouterWithChain adds one or multiple routers for the server.New
 //The given middleware chain will be added to each route.
-func (s *Server) addRouteWithChain(chain xhandler.Chain, r Route) {
+func (s *Server) addRouteWithChain(chain Chain, r Route) {
 
-	s.mux.HandleC(r.Method(), r.Path(), chain.HandlerC(r.Handler()))
+	s.mux.Handle(r.Path(), chain.Handler(r.Handler())).Methods(r.Method())
 
 }
 
 //Handler returns the handler provided by the server
 func (s *Server) Handler() http.Handler {
-	c := cors.New(cors.Options{
-		AllowedHeaders: []string{"Authorization", "Content-Type"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE"},
-		//Debug: true,
-	})
-	return xhandler.New(context.Background(), c.HandlerC(s.mux))
+	return handlers.CORS(handlers.AllowedHeaders([]string{"Authorization", "Content-Type"}), handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE"}))(s.mux)
 }
 
 //Run is a convenience function that runs the server as an HTTP server.
@@ -113,8 +116,8 @@ var ErrInvalidToken = errors.New("Invalid token. Please try to reconnect.")
 var ErrExpiredToken = errors.New("Expired token. Please try to reconnect.")
 
 //Param extract an URL parameter
-func Param(ctx context.Context, name string) string {
-	return xmux.Param(ctx, name)
+func Param(r *http.Request, name string) string {
+	return mux.Vars(r)[name]
 }
 
 func (s *Server) validateToken(tokenString string) (*jwt.Token, error) {
@@ -153,7 +156,7 @@ func (s *Server) validateToken(tokenString string) (*jwt.Token, error) {
 //Route defines an individual API route in the server.
 type Route interface {
 	// Handler returns the raw function to create the http handler.
-	Handler() xhandler.HandlerC
+	Handler() http.Handler
 	// Method returns the http method that the route responds to.
 	Method() string
 	// Path returns the subpath where the route responds to.
@@ -183,16 +186,16 @@ func handleError(r *http.Request, w http.ResponseWriter, err error) {
 }
 
 //NewJSONRoute creates a new route sending back JSON
-func NewJSONRoute(method, path string, handler func(ctx context.Context, r *http.Request) (interface{}, error)) Route {
+func NewJSONRoute(method, path string, handler func(r *http.Request) (interface{}, error)) Route {
 
 	statusCode := http.StatusOK
 	if method == "POST" {
 		statusCode = http.StatusAccepted
 	}
 
-	return NewRoute(method, path, xhandler.HandlerFuncC(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	return NewRoute(method, path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
-		data, err := handler(ctx, r)
+		data, err := handler(r)
 
 		if err != nil {
 			handleError(r, w, err)
@@ -215,7 +218,7 @@ func NewJSONRoute(method, path string, handler func(ctx context.Context, r *http
 }
 
 //NewRoute creates a new route
-func NewRoute(method, path string, handler xhandler.HandlerC) Route {
+func NewRoute(method, path string, handler http.Handler) Route {
 	return basicRoute{
 		m: method,
 		p: path,
@@ -224,7 +227,7 @@ func NewRoute(method, path string, handler xhandler.HandlerC) Route {
 }
 
 //NewRouteFunc creates a new route with an handler function
-func NewRouteFunc(method, path string, handler xhandler.HandlerFuncC) Route {
+func NewRouteFunc(method, path string, handler http.HandlerFunc) Route {
 	return basicRoute{
 		m: method,
 		p: path,
@@ -235,10 +238,10 @@ func NewRouteFunc(method, path string, handler xhandler.HandlerFuncC) Route {
 type basicRoute struct {
 	m string
 	p string
-	h xhandler.HandlerC
+	h http.Handler
 }
 
-func (r basicRoute) Handler() xhandler.HandlerC {
+func (r basicRoute) Handler() http.Handler {
 	return r.h
 }
 func (r basicRoute) Method() string {
@@ -274,7 +277,7 @@ func NewRedirectRoute(from, to string) Route {
 }
 
 //Authenticate returns a signed token if the request contains valid userID and password
-func (s *Server) Authenticate(ctx context.Context, r *http.Request) (string, error) {
+func (s *Server) Authenticate(r *http.Request) (string, error) {
 	userID := r.FormValue("userID")
 	password := r.FormValue("password")
 
@@ -294,6 +297,8 @@ func (s *Server) Authenticate(ctx context.Context, r *http.Request) (string, err
 		}
 	}
 
+	ctx := r.Context()
+
 	err := s.CheckPassword(ctx, userID, password)
 	if err != nil {
 		return "", errors.Wrap(err, "password check failed")
@@ -302,7 +307,7 @@ func (s *Server) Authenticate(ctx context.Context, r *http.Request) (string, err
 	// Create the token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS512, jwt.MapClaims{
 		"userId": userID,
-		"exp": time.Now().Add(s.cfg.SigningDuration).Unix(),
+		"exp":    time.Now().Add(s.cfg.SigningDuration).Unix(),
 	})
 
 	// Sign and get the complete encoded token as a string
@@ -357,9 +362,11 @@ func GetUserID(ctx context.Context) (string, error) {
 }
 
 // AuthenticatedFilter filters logged in users. Users with an invalid session are redirected to the loginURL.
-func (s *Server) AuthenticatedFilter( /*loginURL string*/ ) func(next xhandler.HandlerC) xhandler.HandlerC {
-	return func(next xhandler.HandlerC) xhandler.HandlerC {
-		return xhandler.HandlerFuncC(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func (s *Server) AuthenticatedFilter( /*loginURL string*/ ) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+			ctx := r.Context()
 
 			token, err := s.CheckAuthorization(r)
 			if err == ErrInvalidToken || err == ErrExpiredToken { //TODO: add redirect
@@ -386,7 +393,7 @@ func (s *Server) AuthenticatedFilter( /*loginURL string*/ ) func(next xhandler.H
 			}
 			ctx = newContextWithUserID(ctx, userID)
 
-			next.ServeHTTPC(ctx, w, r)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
