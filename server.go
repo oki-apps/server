@@ -295,7 +295,11 @@ func (s *Server) AuthenticatedFilter() (func(next http.Handler) http.Handler, er
 	if err != nil {
 		return nil, err
 	}
-	verifier := provider.Verifier(oidc.VerifyExpiry())
+	config := oidc.Config{
+		SkipClientIDCheck: true,
+		SkipNonceCheck:    true,
+	}
+	verifier := provider.Verifier(&config)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
