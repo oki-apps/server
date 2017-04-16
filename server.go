@@ -17,10 +17,20 @@ type Config struct {
 	OpenIDConnectIssuer string //The issuer of authorisation tokens
 }
 
+type chain []func(next http.Handler) http.Handler
+
+func (c chain) Handler(h http.Handler) http.Handler {
+	for i := len(c) - 1; i >= 0; i-- {
+		h = c[i](h)
+	}
+	return h
+}
+
 // Server contains instance details for the server
 type Server struct {
-	cfg Config
-	mux *mux.Router
+	cfg         Config
+	mux         *mux.Router
+	middlewares chain
 }
 
 // New returns a new instance of the server based on the specified configuration.
@@ -33,6 +43,19 @@ func New(cfg Config) (*Server, error) {
 	return &s, nil
 }
 
+//Middleware register a new middleware to be used at server level
+func (s *Server) Middleware(m func(next http.Handler) http.Handler) {
+	s.middlewares = append(s.middlewares, m)
+}
+
+//AllowCORS setup default CORS configuration
+func (s *Server) AllowCORS() {
+	s.Middleware(handlers.CORS(
+		handlers.AllowedHeaders([]string{"Authorization", "Content-Type"}),
+		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE"}),
+	))
+}
+
 //Router allow route registration on the server
 func (s *Server) Router() *mux.Router {
 	return s.mux
@@ -40,10 +63,7 @@ func (s *Server) Router() *mux.Router {
 
 //Handler returns the handler provided by the server
 func (s *Server) Handler() http.Handler {
-	return handlers.CORS(
-		handlers.AllowedHeaders([]string{"Authorization", "Content-Type"}),
-		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE"}),
-	)(s.mux)
+	return s.middlewares.Handler(s.mux)
 }
 
 //Run is a convenience function that runs the server as an HTTP server.
