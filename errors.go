@@ -5,6 +5,8 @@
 package server
 
 import (
+	"net/http"
+
 	"github.com/pkg/errors"
 )
 
@@ -44,4 +46,26 @@ func IsRedirect(err error) (bool, string) {
 	}
 	return false, ""
 
+}
+
+func handleError(w http.ResponseWriter, r *http.Request, err error) {
+
+	cause := errors.Cause(err)
+
+	if ok, url := IsRedirect(cause); ok {
+		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+		return
+	}
+
+	if IsNotFound(cause) {
+		http.Error(w, "Data not found", http.StatusNotFound)
+		return
+	}
+
+	if IsNotAuthorized(cause) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	http.Error(w, "Internal server error", http.StatusInternalServerError)
 }
