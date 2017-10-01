@@ -42,7 +42,6 @@ func AuthenticatedFilter(openIDConnectIssuer string) (func(next http.Handler) ht
 	}
 	config := oidc.Config{
 		SkipClientIDCheck: true,
-		SkipNonceCheck:    true,
 	}
 	verifier := provider.Verifier(&config)
 
